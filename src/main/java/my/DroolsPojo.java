@@ -26,10 +26,14 @@ public class DroolsPojo {
 	public void setNumber(int number) {
 		this.number = number;
 	};
-	public List<String> getAsd() {
-	    if (this.asd == null) {
-	        this.asd = new ArrayList<String>();
-	    }
-	    return this.asd;
-	}
+    public void alt_setNumber(int number) {
+        System.out.println("Ciao");
+        this.number = number;
+    };
+    public List<String> getAsd() {
+        if (this.asd == null) {
+            this.asd = new ArrayList<String>();
+        }
+        return this.asd;
+    }
 }

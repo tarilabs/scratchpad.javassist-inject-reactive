@@ -31,26 +31,6 @@ public class AppTest {
     private static final String PERSISTENT_FIELD_WRITER_PREFIX = "$$_drools_write_";
     
     private Map<String, CtMethod> writeMethods = new HashMap<String, CtMethod>();
-
-    @Deprecated
-    public void test() throws Exception {
-        ClassPool cp = ClassPool.getDefault();
-        CtClass droolsPojo = cp.get("my.DroolsPojo");
-        for (CtField f : droolsPojo.getDeclaredFields()) {
-            System.out.println(f);
-        }
-        
-        CodeConverter conv = new CodeConverter();
-        for ( CtField f : collectPersistentFields( droolsPojo ) ) {
-            conv.replaceFieldWrite(f, droolsPojo, "$$_drools_write_"+f.getName());
-        }
-        droolsPojo.instrument(conv);
-        for ( CtField f : collectPersistentFields( droolsPojo ) ) {
-            CtMethod m = CtNewMethod.setter( "$$_drools_write_"+f.getName(), droolsPojo.getField( f.getName() ) );
-            droolsPojo.addMethod( m );
-        }
-        droolsPojo.writeFile("target/JAVASSIST");
-    }
     
     @Test
     public void test2() throws Exception {
@@ -102,7 +82,7 @@ public class AppTest {
 //                        itr.write16bit( methodIndex, index + 1 );
 //                    } else
                     if (op == Opcode.PUTFIELD) {
-                        // FIXME: the makewriter should have been made only once!!
+                        // addMethod is a safe add, if constant already present it return the existing value without adding.
                         final int methodIndex = addMethod( constPool, writeMethods.get(fieldName) );
                         itr.writeByte( Opcode.INVOKEVIRTUAL, index );
                         itr.write16bit( methodIndex, index + 1 );
@@ -128,7 +108,11 @@ public class AppTest {
         return method;
     }
     
+    /**
+     * Add Method to ConstPool. If method was not in the ConstPool will add and return index, otherwise will return index of already existing entry of constpool
+     */
     private static int addMethod(ConstPool cPool, CtMethod method) {
+        // addMethodrefInfo is a safe add, if constant already present it return the existing value without adding.
         return cPool.addMethodrefInfo( cPool.getThisClassInfo(), method.getName(), method.getSignature() );
     }
     
