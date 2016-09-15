@@ -1,10 +1,16 @@
 package net.tarilabs.scratchpad.javassist_inject_reactive;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 
+import org.drools.core.phreak.ReactiveList;
+import org.drools.core.phreak.ReactiveObject;
+import org.drools.core.phreak.ReactiveObjectUtil;
+import org.drools.core.spi.Tuple;
+import org.junit.Before;
 import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -14,34 +20,88 @@ import javassist.ClassPool;
 import javassist.CodeConverter;
 import javassist.CtClass;
 import javassist.CtField;
+import javassist.CtField.Initializer;
 import javassist.CtMethod;
 import javassist.CtNewMethod;
 import javassist.Modifier;
 import javassist.NotFoundException;
 import javassist.bytecode.BadBytecode;
 import javassist.bytecode.ClassFileWriter.MethodWriter;
+import javassist.bytecode.SignatureAttribute.ClassType;
+import javassist.bytecode.SignatureAttribute.MethodSignature;
+import javassist.bytecode.SignatureAttribute.TypeArgument;
 import javassist.bytecode.CodeIterator;
 import javassist.bytecode.ConstPool;
 import javassist.bytecode.MethodInfo;
 import javassist.bytecode.Opcode;
+import javassist.bytecode.SignatureAttribute;
 import javassist.bytecode.stackmap.MapMaker;
 
 public class AppTest {
+    private static final String DROOLS_PREFIX = "$$_drools_";
+    private static final String FIELD_WRITER_PREFIX = DROOLS_PREFIX + "write_";
+    private static final String DROOLS_LIST_OF_TUPLES = DROOLS_PREFIX + "lts";
+
     public static final Logger LOG = LoggerFactory.getLogger(AppTest.class);
-    private static final String PERSISTENT_FIELD_WRITER_PREFIX = "$$_drools_write_";
+     
+
     
     private Map<String, CtMethod> writeMethods = new HashMap<String, CtMethod>();
     
+    private ClassPool cp;
+    private CtClass ReactiveObjectUtilCtClass;
+    private CtClass ReactiveObjectCtClass; 
+    private CtClass ListCtClass;
+    private CtClass ArrayListCtClass;
+    
+    @Before
+    public void init() throws Exception {
+        cp = ClassPool.getDefault();
+        ReactiveObjectUtilCtClass = cp.get(ReactiveObjectUtil.class.getName());
+        ReactiveObjectCtClass = cp.get(ReactiveObject.class.getName());
+        ListCtClass = cp.get(List.class.getName());
+        ArrayListCtClass = cp.get(ArrayList.class.getName());
+    }
+    
     @Test
     public void test2() throws Exception {
-        ClassPool cp = ClassPool.getDefault();
         CtClass droolsPojo = cp.get("my.DroolsPojo");
-        for (CtField f : droolsPojo.getDeclaredFields()) {
-            System.out.println(f);
-            writeMethods.put(f.getName(), makeWriter(droolsPojo, f));
-        }
         
-        enhanceAttributesAccess(droolsPojo);
+        droolsPojo.addInterface(ReactiveObjectCtClass);
+        
+        CtField ltsCtField = new CtField(ListCtClass, DROOLS_LIST_OF_TUPLES, droolsPojo);
+        ltsCtField.setModifiers(Modifier.PRIVATE);
+        ClassType listOfTuple = new SignatureAttribute.ClassType(List.class.getName(),
+                new TypeArgument[]{new TypeArgument( new SignatureAttribute.ClassType(Tuple.class.getName()) )});
+        ltsCtField.setGenericSignature(
+                listOfTuple.encode()
+                );
+        // Do not use the Initializer.byNew... as those method always pass at least 1 parameter which is "this".
+        droolsPojo.addField(ltsCtField, Initializer.byExpr("new "+ArrayList.class.getName()+"();"));
+        
+        final CtMethod getLeftTuplesCtMethod = CtNewMethod.make(
+                "public java.util.List getLeftTuples() {\n" + 
+                "    return this.$$_drools_lts;\n" + 
+                "}", droolsPojo );
+        MethodSignature getLeftTuplesSignature = new MethodSignature(null, null, listOfTuple, null);
+        getLeftTuplesCtMethod.setGenericSignature(getLeftTuplesSignature.encode());
+        droolsPojo.addMethod(getLeftTuplesCtMethod);
+        
+        final CtMethod addLeftTupleCtMethod = CtNewMethod.make(
+                "public void addLeftTuple("+Tuple.class.getName()+" leftTuple) {\n" + 
+                "    if ($$_drools_lts == null) {\n" + 
+                "        $$_drools_lts = new java.util.ArrayList();\n" + 
+                "    }\n" + 
+                "    $$_drools_lts.add(leftTuple);\n" + 
+                "}", droolsPojo );
+        droolsPojo.addMethod(addLeftTupleCtMethod);
+        
+//        for (CtField f : droolsPojo.getDeclaredFields()) {
+//            System.out.println(f);
+//            writeMethods.put(f.getName(), makeWriter(droolsPojo, f));
+//        }
+//        
+//        enhanceAttributesAccess(droolsPojo);
         
         droolsPojo.writeFile("target/JAVASSIST");
     }
@@ -55,7 +115,7 @@ public class AppTest {
             final String methodName = methodInfo.getName();
 
             // skip methods added by enhancement and abstract methods (methods without any code)
-            if ( methodName.startsWith( "$$_drools_" ) || methodInfo.getCodeAttribute() == null ) {
+            if ( methodName.startsWith( DROOLS_PREFIX ) || methodInfo.getCodeAttribute() == null ) {
                 continue;
             }
 
@@ -104,6 +164,7 @@ public class AppTest {
         final String body = String.format( format, args );
         System.out.printf( "writing method into [%s]:%n%s%n", target.getName(), body );
         final CtMethod method = CtNewMethod.make( body, target );
+        System.err.println(body);
         target.addMethod( method );
         return method;
     }
@@ -119,7 +180,7 @@ public class AppTest {
     private CtMethod makeWriter(CtClass managedCtClass,
             CtField field) throws Exception {
         final String fieldName = field.getName();
-        final String writerName = PERSISTENT_FIELD_WRITER_PREFIX + fieldName;
+        final String writerName = FIELD_WRITER_PREFIX + fieldName;
         
         return write(
                 managedCtClass,
@@ -133,17 +194,22 @@ public class AppTest {
     }
 
     private String buildWriteInterceptionBodyFragment(CtField field) throws NotFoundException {
+        // remember: In the source text given to setBody(), the identifiers starting with $ have special meaning
+        // $0, $1, $2, ...     this and actual parameters 
         System.out.println(field.getType().getClass() + " " + field.getType());
         if ( field.getType().subtypeOf(ClassPool.getDefault().get(java.util.List.class.getCanonicalName())) ) {
             return String.format(
-                    "  this.%1$s = $1;%n" +
+                    "  this.%1$s = new "+ReactiveList.class.getName()+"($1);%n" +
                     "  System.out.println(\"That was a list\"); ",
                     field.getName()
                     );
         }
+        
+        // 2nd line will result in: ReactiveObjectUtil.notifyModification((ReactiveObject) this);
+        // and that is fine because ASM: INVOKESTATIC org/drools/core/phreak/ReactiveObjectUtil.notifyModification (Lorg/drools/core/phreak/ReactiveObject;)V
         return String.format(
                 "  this.%1$s = $1;%n" +
-                "  System.out.println(\"x\"); ",
+                "  "+ReactiveObjectUtil.class.getName()+".notifyModification($0); ",
                 field.getName()
                 );
     }
