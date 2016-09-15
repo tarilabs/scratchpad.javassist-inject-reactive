@@ -1,6 +1,7 @@
 package net.tarilabs.scratchpad.javassist_inject_reactive;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
@@ -36,6 +37,7 @@ import javassist.bytecode.MethodInfo;
 import javassist.bytecode.Opcode;
 import javassist.bytecode.SignatureAttribute;
 import javassist.bytecode.stackmap.MapMaker;
+import my.DroolsPojo;
 
 public class AppTest {
     private static final String DROOLS_PREFIX = "$$_drools_";
@@ -49,18 +51,14 @@ public class AppTest {
     private Map<String, CtMethod> writeMethods = new HashMap<String, CtMethod>();
     
     private ClassPool cp;
-    private CtClass ReactiveObjectUtilCtClass;
     private CtClass ReactiveObjectCtClass; 
     private CtClass ListCtClass;
-    private CtClass ArrayListCtClass;
     
     @Before
     public void init() throws Exception {
         cp = ClassPool.getDefault();
-        ReactiveObjectUtilCtClass = cp.get(ReactiveObjectUtil.class.getName());
         ReactiveObjectCtClass = cp.get(ReactiveObject.class.getName());
         ListCtClass = cp.get(List.class.getName());
-        ArrayListCtClass = cp.get(ArrayList.class.getName());
     }
     
     @Test
@@ -77,7 +75,7 @@ public class AppTest {
                 listOfTuple.encode()
                 );
         // Do not use the Initializer.byNew... as those method always pass at least 1 parameter which is "this".
-        droolsPojo.addField(ltsCtField, Initializer.byExpr("new "+ArrayList.class.getName()+"();"));
+        droolsPojo.addField(ltsCtField, Initializer.byExpr("new java.util.ArrayList();"));
         
         final CtMethod getLeftTuplesCtMethod = CtNewMethod.make(
                 "public java.util.List getLeftTuples() {\n" + 
@@ -96,14 +94,21 @@ public class AppTest {
                 "}", droolsPojo );
         droolsPojo.addMethod(addLeftTupleCtMethod);
         
-//        for (CtField f : droolsPojo.getDeclaredFields()) {
-//            System.out.println(f);
-//            writeMethods.put(f.getName(), makeWriter(droolsPojo, f));
-//        }
-//        
-//        enhanceAttributesAccess(droolsPojo);
+        for (CtField f : collectReactiveFields(droolsPojo)) {
+            System.out.println(f);
+            writeMethods.put(f.getName(), makeWriter(droolsPojo, f));
+        }
         
+        enhanceAttributesAccess(droolsPojo);
+        
+        // first call toClass before the original class is loaded, it will persist the bytecode instrumentation changes in the classloader.
         droolsPojo.writeFile("target/JAVASSIST");
+        droolsPojo.toClass();
+        
+        System.out.println("---");
+        Arrays.stream(DroolsPojo.class.getMethods()).forEach(System.out::println);
+        
+        new DroolsPojo("", 1);
     }
     
     protected void enhanceAttributesAccess(CtClass managedCtClass) throws Exception {
@@ -128,12 +133,16 @@ public class AppTest {
                         continue;
                     }
 
-                    // only transform access to fields of the entity being enhanced
-                    if ( !managedCtClass.getName().equals( constPool.getFieldrefClassName( itr.u16bitAt( index + 1 ) ) ) ) {
-                        continue;
-                    }
+//                    // only transform access to fields of the entity being enhanced
+//                    if ( !managedCtClass.getName().equals( constPool.getFieldrefClassName( itr.u16bitAt( index + 1 ) ) ) ) {
+//                        continue;
+//                    }
 
                     final String fieldName = constPool.getFieldrefName( itr.u16bitAt( index + 1 ) );
+                    
+                    if (!collectReactiveFields(managedCtClass).stream().map(ct->ct.getName()).filter(n->n.equals(fieldName)).findAny().isPresent() ) {
+                        continue;
+                    }
 
 
 //                    if ( op == Opcode.GETFIELD ) {
@@ -177,8 +186,7 @@ public class AppTest {
         return cPool.addMethodrefInfo( cPool.getThisClassInfo(), method.getName(), method.getSignature() );
     }
     
-    private CtMethod makeWriter(CtClass managedCtClass,
-            CtField field) throws Exception {
+    private CtMethod makeWriter(CtClass managedCtClass, CtField field) throws Exception {
         final String fieldName = field.getName();
         final String writerName = FIELD_WRITER_PREFIX + fieldName;
         
@@ -197,10 +205,10 @@ public class AppTest {
         // remember: In the source text given to setBody(), the identifiers starting with $ have special meaning
         // $0, $1, $2, ...     this and actual parameters 
         System.out.println(field.getType().getClass() + " " + field.getType());
-        if ( field.getType().subtypeOf(ClassPool.getDefault().get(java.util.List.class.getCanonicalName())) ) {
+        
+        if ( field.getType().subtypeOf( ListCtClass ) ) {
             return String.format(
-                    "  this.%1$s = new "+ReactiveList.class.getName()+"($1);%n" +
-                    "  System.out.println(\"That was a list\"); ",
+                    "  this.%1$s = new "+ReactiveList.class.getName()+"($1); ",
                     field.getName()
                     );
         }
@@ -214,11 +222,11 @@ public class AppTest {
                 );
     }
 
-    private static CtField[] collectPersistentFields(CtClass managedCtClass) {
-        final List<CtField> persistentFieldList = new LinkedList<CtField>();
+    private static List<CtField> collectReactiveFields(CtClass managedCtClass) {
+        final List<CtField> persistentFieldList = new ArrayList<CtField>();
         for ( CtField ctField : managedCtClass.getDeclaredFields() ) {
             // skip static fields and skip fields added by enhancement
-            if ( Modifier.isStatic( ctField.getModifiers() ) || ctField.getName().startsWith( "$$_hibernate_" ) ) {
+            if ( Modifier.isStatic( ctField.getModifiers() ) || ctField.getName().startsWith( DROOLS_PREFIX ) ) {
                 continue;
             }
             // skip outer reference in inner classes
@@ -227,19 +235,18 @@ public class AppTest {
             }
             persistentFieldList.add( ctField );
         }
-        // HHH-10646 Add fields inherited from @MappedSuperclass
         // CtClass.getFields() does not return private fields, while CtClass.getDeclaredFields() does not return inherit
         for ( CtField ctField : managedCtClass.getFields() ) {
             if ( ctField.getDeclaringClass().equals( managedCtClass ) ) {
                 // Already processed above
                 continue;
             }
-            if ( Modifier.isStatic( ctField.getModifiers() ) ) {
+            if ( Modifier.isStatic( ctField.getModifiers() ) || ctField.getName().startsWith( DROOLS_PREFIX ) ) {
                 continue;
             }
             persistentFieldList.add( ctField );
         }
-        return persistentFieldList.toArray(new CtField[]{});
+        return persistentFieldList;
     }
     
 }
