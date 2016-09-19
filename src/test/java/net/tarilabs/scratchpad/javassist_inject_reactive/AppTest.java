@@ -1,11 +1,18 @@
 package net.tarilabs.scratchpad.javassist_inject_reactive;
 
+import java.io.File;
+import java.io.InputStream;
+import java.lang.reflect.Method;
+import java.net.URI;
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.jar.JarFile;
 
 import org.drools.core.phreak.ReactiveList;
 import org.drools.core.phreak.ReactiveObject;
@@ -17,6 +24,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javassist.CannotCompileException;
+import javassist.ClassClassPath;
+import javassist.ClassPath;
 import javassist.ClassPool;
 import javassist.CodeConverter;
 import javassist.CtClass;
@@ -24,6 +33,7 @@ import javassist.CtField;
 import javassist.CtField.Initializer;
 import javassist.CtMethod;
 import javassist.CtNewMethod;
+import javassist.LoaderClassPath;
 import javassist.Modifier;
 import javassist.NotFoundException;
 import javassist.bytecode.BadBytecode;
@@ -53,10 +63,39 @@ public class AppTest {
     private ClassPool cp;
     private CtClass ReactiveObjectCtClass; 
     private CtClass ListCtClass;
+    private String droolsCorePath;
     
     @Before
     public void init() throws Exception {
-        cp = ClassPool.getDefault();
+//        URL url = new File("target/classes/").toURI().toURL();
+//        System.out.println(url);
+//        ClassLoader cl = URLClassLoader.newInstance(new URL[]{url}, null);
+//        cl.loadClass(DroolsPojo.class.getName());
+        
+        // demonstrating use in current ClassLoader.
+        ClassLoader.getSystemClassLoader().loadClass(DroolsPojo.class.getName());
+        new DroolsPojo("", 22);
+        
+        ClassPool parent = ClassPool.getDefault();
+        
+        String aname = ReactiveObject.class.getPackage().getName().replaceAll("\\.", "/") + "/" +  ReactiveObject.class.getSimpleName()+".class";
+        System.out.println(aname);
+        String apath = ClassLoader.getSystemClassLoader().getResource( aname).getPath();
+        System.out.println( apath );
+        String path = apath.substring(0, apath.indexOf("!"));
+        System.out.println( path );
+        
+        File f = new File(new URI(path));
+        System.out.println( f.exists() );
+        System.out.println(f.getAbsolutePath());
+        
+        droolsCorePath = f.getAbsolutePath();
+        
+        ClassPool child = new ClassPool(null);
+        child.appendSystemPath();
+        child.appendClassPath(f.getAbsolutePath());
+        cp = child;
+        
         ReactiveObjectCtClass = cp.get(ReactiveObject.class.getName());
         ListCtClass = cp.get(List.class.getName());
     }
@@ -103,12 +142,21 @@ public class AppTest {
         
         // first call toClass before the original class is loaded, it will persist the bytecode instrumentation changes in the classloader.
         droolsPojo.writeFile("target/JAVASSIST");
-        droolsPojo.toClass();
         
-        System.out.println("---");
+        URL url = new File("target/classes/").toURI().toURL();
+        System.out.println(url);
+        ClassLoader cl = URLClassLoader.newInstance(new URL[]{url, new File(droolsCorePath).toURI().toURL()}, null);
+        droolsPojo.toClass(cl, Class.class.getProtectionDomain());
+        
+        System.out.println("--- in default classloader: ");
         Arrays.stream(DroolsPojo.class.getMethods()).forEach(System.out::println);
         
         new DroolsPojo("", 1);
+        
+        System.out.println("--- using 'isolated' classloader: ");
+        Class<?> droolsPojoInIsolatedCL = cl.loadClass(DroolsPojo.class.getName());
+        Arrays.stream(droolsPojoInIsolatedCL.getMethods()).forEach(System.out::println);
+        
     }
     
     protected void enhanceAttributesAccess(CtClass managedCtClass) throws Exception {
